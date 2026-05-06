@@ -1,8 +1,21 @@
 """
-Strategy: turn a rolling DataFrame of closed candles into a Signal (or None).
+Strategy: SMC IFVG entry on a single timeframe (4h).
 
-This is a thin wrapper around detectors. The same logic that drove the backtest
-should produce identical signals here when fed the same data.
+This is a methodology-derived strategy distilled from 1775 trader transcripts
+(see docs/daniel_ramirez_bot_strategy.md for the full blended spec).
+
+V1 implements the spec's "Setup A: Inversion FVG (IFVG) Entry" on a single
+timeframe only. Multi-timeframe bias and SMT divergence are deferred per
+CLAUDE.md's "things to skip for v1" list.
+
+Pipeline (called once per closed candle):
+  1. Bias: market_structure on swings (HH+HL = bullish; LH+LL = bearish)
+  2. Premium/Discount filter: longs in discount only, shorts in premium only
+  3. FVG: most-recent valid FVG within max_age, sized between min/max pct
+  4. IFVG trigger: current bar close inverts that FVG
+  5. Liquidity sweep: V-shaped sweep within last sweep_lookback bars
+  6. DOL: equal highs/lows or nearest swing past min_rr * stop_distance
+  7. TP1 = max(entry + min_rr * R, DOL); TP2 = entry + max_rr * R
 """
 from dataclasses import dataclass
 from typing import Optional, Literal
@@ -29,81 +42,133 @@ class StrategyConfig:
     enable_long: bool = True
     enable_short: bool = True
     slippage_pct: float = 0.0005
+    # IFVG-specific. The methodology spec uses these for ES/NQ futures at
+    # 5M; we adapt to BTC/ETH 4h here. Wider size band to accommodate higher
+    # crypto volatility and 4h gap distribution.
+    max_fvg_age: int = 20            # bars; FVGs older than this are stale
+    min_fvg_size_pct: float = 0.001  # 0.1% of price
+    max_fvg_size_pct: float = 0.020  # 2.0% of price
+    sweep_lookback: int = 30         # bars to walk back searching for a sweep
+    stop_buffer_pct: float = 0.001   # extra distance below sweep low / above sweep high
+    min_rr: float = 2.0              # TP1 floor in R-multiples
+    max_rr: float = 3.0              # TP2 cap in R-multiples
 
 
 def generate_signal(df: pd.DataFrame, cfg: StrategyConfig = StrategyConfig()) -> Optional[Signal]:
-    """Called once per closed candle. Returns a Signal or None."""
+    """One Signal or None per closed bar. Same contract as before so the
+    engine and backtester are unchanged."""
     if len(df) < 60:
         return None
 
-    i = len(df) - 1
-    bar = df.iloc[i]
     swings = d.find_swings(df, lookback=cfg.swing_lookback)
     if len(swings) < 4:
         return None
 
     bias = d.market_structure(swings)
-    sweep = d.detect_liquidity_sweep(df, swings, i)
-    if sweep is None:
+    if bias == "neutral":
         return None
 
-    range_high = df["high"].iloc[-cfg.range_window:].max()
-    range_low = df["low"].iloc[-cfg.range_window:].min()
+    bar = df.iloc[-1]
+    price = float(bar["close"])
+    range_high = float(df["high"].iloc[-cfg.range_window:].max())
+    range_low = float(df["low"].iloc[-cfg.range_window:].min())
 
-    if cfg.enable_long and sweep["kind"] == "bullish" and bias in ("bullish", "neutral"):
-        ob = d.find_order_block(df, i, "bullish", max_lookback=10)
-        if ob is None:
-            return None
-        price = bar["close"]
-        if not (ob.low <= price <= ob.high):
-            return None
-        if not d.in_discount(price, range_high, range_low):
-            return None
-        entry = price * (1 + cfg.slippage_pct)
-        sl = sweep["swept_level"] * 0.999
-        if entry <= sl:
-            return None
-        risk = entry - sl
-        tp1 = entry + risk
-        highs_above = [s.price for s in swings if s.kind == "high" and s.price > entry]
-        tp2 = min(highs_above) if highs_above else entry + 3 * risk
-        return Signal(
-            side="long", entry=entry, stop_loss=sl,
-            take_profit_1=tp1, take_profit_2=tp2,
-            swept_level=sweep["swept_level"], bias=bias,
-            notes=f"sweep@{sweep['swept_level']:.2f}",
-        )
+    if cfg.enable_long and bias == "bullish" and d.in_discount(price, range_high, range_low):
+        sig = _long_signal(df, swings, bar, price, cfg)
+        if sig is not None:
+            return sig
 
-    if cfg.enable_short and sweep["kind"] == "bearish" and bias in ("bearish", "neutral"):
-        ob = d.find_order_block(df, i, "bearish", max_lookback=10)
-        if ob is None:
-            return None
-        price = bar["close"]
-        if not (ob.low <= price <= ob.high):
-            return None
-        if not d.in_premium(price, range_high, range_low):
-            return None
-        entry = price * (1 - cfg.slippage_pct)
-        sl = sweep["swept_level"] * 1.001
-        if entry >= sl:
-            return None
-        risk = sl - entry
-        tp1 = entry - risk
-        lows_below = [s.price for s in swings if s.kind == "low" and s.price < entry]
-        tp2 = max(lows_below) if lows_below else entry - 3 * risk
-        return Signal(
-            side="short", entry=entry, stop_loss=sl,
-            take_profit_1=tp1, take_profit_2=tp2,
-            swept_level=sweep["swept_level"], bias=bias,
-            notes=f"sweep@{sweep['swept_level']:.2f}",
-        )
+    if cfg.enable_short and bias == "bearish" and d.in_premium(price, range_high, range_low):
+        sig = _short_signal(df, swings, bar, price, cfg)
+        if sig is not None:
+            return sig
 
     return None
 
 
+def _long_signal(df, swings, bar, price, cfg) -> Optional[Signal]:
+    fvg = d.find_freshly_inverted_fvg(
+        df,
+        side="long",
+        max_age=cfg.max_fvg_age,
+        min_size_pct=cfg.min_fvg_size_pct,
+        max_size_pct=cfg.max_fvg_size_pct,
+    )
+    if fvg is None:
+        return None
+
+    sweep = d.detect_recent_liquidity_sweep(df, swings, lookback=cfg.sweep_lookback)
+    if sweep is None or sweep["kind"] != "bullish":
+        return None
+
+    entry = price * (1 + cfg.slippage_pct)
+    stop = sweep["swept_level"] * (1 - cfg.stop_buffer_pct)
+    if entry <= stop:
+        return None
+    risk = entry - stop
+
+    dol = d.find_dol(swings, side="long", entry=entry, min_distance=cfg.min_rr * risk)
+    if dol is None:
+        return None
+
+    tp1 = max(entry + cfg.min_rr * risk, dol)
+    tp2 = entry + cfg.max_rr * risk
+
+    return Signal(
+        side="long",
+        entry=entry,
+        stop_loss=stop,
+        take_profit_1=tp1,
+        take_profit_2=tp2,
+        swept_level=float(sweep["swept_level"]),
+        bias="bullish",
+        notes=f"ifvg_long sweep@{sweep['swept_level']:.2f} fvg=[{fvg.bottom:.2f},{fvg.top:.2f}]",
+    )
+
+
+def _short_signal(df, swings, bar, price, cfg) -> Optional[Signal]:
+    fvg = d.find_freshly_inverted_fvg(
+        df,
+        side="short",
+        max_age=cfg.max_fvg_age,
+        min_size_pct=cfg.min_fvg_size_pct,
+        max_size_pct=cfg.max_fvg_size_pct,
+    )
+    if fvg is None:
+        return None
+
+    sweep = d.detect_recent_liquidity_sweep(df, swings, lookback=cfg.sweep_lookback)
+    if sweep is None or sweep["kind"] != "bearish":
+        return None
+
+    entry = price * (1 - cfg.slippage_pct)
+    stop = sweep["swept_level"] * (1 + cfg.stop_buffer_pct)
+    if entry >= stop:
+        return None
+    risk = stop - entry
+
+    dol = d.find_dol(swings, side="short", entry=entry, min_distance=cfg.min_rr * risk)
+    if dol is None:
+        return None
+
+    tp1 = min(entry - cfg.min_rr * risk, dol)
+    tp2 = entry - cfg.max_rr * risk
+
+    return Signal(
+        side="short",
+        entry=entry,
+        stop_loss=stop,
+        take_profit_1=tp1,
+        take_profit_2=tp2,
+        swept_level=float(sweep["swept_level"]),
+        bias="bearish",
+        notes=f"ifvg_short sweep@{sweep['swept_level']:.2f} fvg=[{fvg.bottom:.2f},{fvg.top:.2f}]",
+    )
+
+
 def position_size_usd(equity: float, entry: float, stop_loss: float, risk_pct: float,
-                     max_leverage: float = 10.0) -> float:
-    """Return USD notional for a position risking risk_pct of equity."""
+                      max_leverage: float = 10.0) -> float:
+    """USD notional for a position risking risk_pct of equity, capped at max_leverage."""
     risk_usd = equity * risk_pct
     distance = abs(entry - stop_loss) / entry
     if distance <= 0:
