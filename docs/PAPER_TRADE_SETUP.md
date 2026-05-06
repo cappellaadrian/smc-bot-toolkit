@@ -89,11 +89,15 @@ journalctl -u smc-bot -f
 ## 6. Watch the dashboard
 
 ```bash
-pip install -e ".[dashboard]"   # one-time, adds streamlit + altair
-streamlit run scripts/dashboard.py
+pip install -e ".[dashboard]"   # one-time, adds streamlit + altair + anthropic
+streamlit run streamlit_app.py
 ```
 
-Opens at http://localhost:8501. Auto-refreshes every 30 seconds with new equity/trade data.
+Opens at http://localhost:8501. Two pages in the sidebar:
+- **Trade Reviewer** — score a trade idea / chart screenshot against the methodology
+- **Live Performance** — equity curve, trades, outcomes from the running bot
+
+The app also deploys cleanly to Streamlit Community Cloud (see `docs/DEPLOY_STREAMLIT.md`).
 
 ## 7. Reconcile weekly
 

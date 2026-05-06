@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-"""Streamlit dashboard for the SMC paper bot.
+"""Live Performance — read the bot's Supabase tables and render KPIs.
 
-Reads the bot's Supabase tables (positions, equity_snapshots, kill_switch_events)
-and renders an equity curve, trade ledger, and per-symbol summary.
-
-Run with:
-  streamlit run scripts/dashboard.py
-  # opens at http://localhost:8501
-
-Requires SUPABASE_URL and SUPABASE_KEY in .env.
+Run via the multi-page Streamlit app:
+  streamlit run streamlit_app.py
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -20,35 +14,64 @@ import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = ROOT.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from bot.config import load  # noqa: E402
+# Promote st.secrets to env (works on Streamlit Cloud + local).
+try:
+    for k, v in st.secrets.items():
+        if isinstance(v, (str, int, float)):
+            os.environ.setdefault(k, str(v))
+except Exception:
+    pass
 
-st.set_page_config(page_title="SMC Paper Bot", layout="wide")
-st.title("SMC Paper Bot")
+from dotenv import load_dotenv  # noqa: E402
 
-settings = load()
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(ROOT / ".env", override=False)
 
-if not settings.supabase_url or not settings.supabase_key:
-    st.error("Supabase not configured. Set SUPABASE_URL and SUPABASE_KEY in .env, then reload.")
+st.set_page_config(page_title="Live Performance", layout="wide")
+st.title("Live Performance")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.warning(
+        "Supabase isn't configured yet. Once you set `SUPABASE_URL` and "
+        "`SUPABASE_KEY` (in Streamlit secrets or `.env`), this page will "
+        "show your bot's equity curve and trade history."
+    )
+    st.markdown(
+        """
+**To set up:**
+1. Create a Supabase project at https://supabase.com (free tier is fine).
+2. Run `supabase/migrations/20260506_init.sql` in the SQL editor.
+3. Copy the project URL and anon key into your secrets.
+4. Reload this page.
+
+See `docs/PAPER_TRADE_SETUP.md` for the full walkthrough.
+"""
+    )
     st.stop()
 
 try:
     from supabase import create_client
 except ImportError:
-    st.error("supabase-py not installed. Run: pip install -e .[dev]")
+    st.error("supabase-py not installed. `pip install supabase`")
     st.stop()
 
 
 @st.cache_resource
 def get_client():
-    return create_client(settings.supabase_url, settings.supabase_key)
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 @st.cache_data(ttl=30)
 def fetch_positions() -> pd.DataFrame:
     client = get_client()
-    rows = client.table("positions").select("*").order("opened_at", desc=True).limit(2000).execute().data
+    rows = (client.table("positions").select("*")
+            .order("opened_at", desc=True).limit(2000).execute().data)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
@@ -90,7 +113,6 @@ positions = fetch_positions()
 equity = fetch_equity()
 kills = fetch_kill_events()
 
-# --- Top row: KPIs ---
 c1, c2, c3, c4 = st.columns(4)
 if not equity.empty:
     latest_equity = float(equity.iloc[-1]["equity"])
@@ -118,7 +140,6 @@ if not closed.empty:
 else:
     c4.metric("Realized PnL", "—")
 
-# --- Equity curve ---
 st.subheader("Equity curve")
 if equity.empty:
     st.info("No equity snapshots yet. Once the bot runs through a candle it will start logging.")
@@ -130,7 +151,6 @@ else:
     ).properties(height=320)
     st.altair_chart(chart, use_container_width=True)
 
-# --- Per-symbol breakdown ---
 st.subheader("Per-symbol summary")
 if closed.empty:
     st.info("No closed trades yet.")
@@ -145,7 +165,6 @@ else:
     by_sym = by_sym[["symbol", "trades", "wins", "losses", "win_rate_pct", "pnl"]]
     st.dataframe(by_sym, use_container_width=True, hide_index=True)
 
-# --- Outcomes donut ---
 if not closed.empty:
     st.subheader("Outcomes")
     outcome = closed["outcome"].value_counts().reset_index()
@@ -157,7 +176,6 @@ if not closed.empty:
     ).properties(height=300)
     st.altair_chart(chart, use_container_width=True)
 
-# --- Trade ledger ---
 st.subheader("Recent trades")
 if positions.empty:
     st.info("No trades yet.")
@@ -168,7 +186,6 @@ else:
     show["realized_pnl_usd"] = show["realized_pnl_usd"].round(2)
     st.dataframe(show, use_container_width=True, hide_index=True)
 
-# --- Kill-switch events ---
 if not kills.empty:
     st.subheader("Kill-switch events")
     st.dataframe(kills, use_container_width=True, hide_index=True)

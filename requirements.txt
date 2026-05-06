@@ -1,0 +1,11 @@
+# Streamlit Cloud reads this. Local dev should use `pip install -e .[dashboard]`.
+streamlit>=1.50
+altair>=5.0
+anthropic>=0.40
+python-dotenv>=1.0
+pandas>=2.0
+pyarrow>=14.0
+supabase>=2.3
+pydantic>=2.5
+pydantic-settings>=2.1
+loguru>=0.7

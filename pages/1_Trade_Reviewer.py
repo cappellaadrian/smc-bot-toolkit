@@ -1,13 +1,7 @@
-#!/usr/bin/env python3
-"""Streamlit page: paste a trade idea (and/or upload a chart screenshot) and
-have Claude evaluate it against the encoded SMC methodology.
+"""Trade Reviewer — Claude-powered methodology check on a trade idea / chart.
 
-Run with:
-  streamlit run scripts/analyze_trade.py
-
-Reads ANTHROPIC_API_KEY from project .env (../../.env) or live_bot/.env.
-The methodology spec is loaded once and cached in the system prompt
-(so subsequent analyses are cheap due to prompt caching).
+Run via the multi-page Streamlit app:
+  streamlit run streamlit_app.py
 """
 from __future__ import annotations
 
@@ -22,32 +16,36 @@ ROOT = Path(__file__).resolve().parents[1]            # .../live_bot
 PROJECT_ROOT = ROOT.parent                             # .../trading-project
 SPEC_PATH = ROOT / "docs" / "daniel_ramirez_bot_strategy.md"
 
-# .env preference: project root (where the extraction script writes it),
-# then live_bot's own .env if a separate one exists.
+# Promote st.secrets to env (works on Streamlit Cloud + local).
+try:
+    for k, v in st.secrets.items():
+        if isinstance(v, (str, int, float)):
+            os.environ.setdefault(k, str(v))
+except Exception:
+    pass
+
+# Locally, also try .env files.
 load_dotenv(PROJECT_ROOT / ".env")
 load_dotenv(ROOT / ".env", override=False)
 
 import anthropic  # noqa: E402
 
-st.set_page_config(page_title="SMC Trade Reviewer", layout="wide")
-st.title("SMC Trade Reviewer")
+st.set_page_config(page_title="Trade Reviewer", layout="wide")
+st.title("Trade Reviewer")
 st.caption(
     "Paste a trade idea or upload a chart screenshot. Claude evaluates it "
-    "against the encoded methodology (Setups A/B/C, bias, P/D, FVG, sweep, DOL)."
+    "against the encoded methodology (bias, P/D, FVG, sweep, IFVG, DOL, RR)."
 )
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     st.error(
-        "ANTHROPIC_API_KEY not set. Add it to "
-        f"`{PROJECT_ROOT}/.env` and reload."
+        "ANTHROPIC_API_KEY not set. Add it in the sidebar via Streamlit secrets, "
+        "or `.env` at the project root, then reload."
     )
     st.stop()
 
 if not SPEC_PATH.exists():
-    st.error(
-        f"Methodology spec not found at {SPEC_PATH}. "
-        "Run the synthesis pipeline in the trading-project workspace first."
-    )
+    st.error(f"Methodology spec not found at {SPEC_PATH}.")
     st.stop()
 
 
@@ -91,7 +89,7 @@ Rules:
 - If the user uploaded a chart, use it. Read the price action visible on the chart for bias, sweeps, FVGs.
 - If both a chart and text are given, cross-check them and flag contradictions.
 - Quote 1-2 specific lines from the methodology when relevant.
-- Never invent levels the user didn't show. If you can't see a number, say "I cannot read this from the chart" and ask for it."""
+- Never invent levels the user didn't show. If you cannot read a number from the chart, say so and ask for it."""
 
 
 @st.cache_resource
@@ -121,7 +119,6 @@ def build_user_message(description: str, image_bytes: bytes | None,
     return parts
 
 
-# --- UI ---
 with st.form("trade_form", clear_on_submit=False):
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -143,7 +140,6 @@ with st.form("trade_form", clear_on_submit=False):
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=False,
         )
-
     submitted = st.form_submit_button("Analyze", type="primary")
 
 if submitted:
@@ -156,7 +152,7 @@ if submitted:
     if uploaded is not None:
         image_bytes = uploaded.getvalue()
         image_type = uploaded.type or "image/png"
-        st.image(image_bytes, caption="Uploaded chart", width="stretch")
+        st.image(image_bytes, caption="Uploaded chart", use_container_width=True)
 
     spec = load_spec()
     user_content = build_user_message(description, image_bytes, image_type, symbol, tf)
