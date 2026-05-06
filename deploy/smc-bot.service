@@ -1,0 +1,17 @@
+[Unit]
+Description=SMC Paper Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=adrian
+WorkingDirectory=/home/adrian/smc-paper-bot
+Environment="PATH=/home/adrian/smc-paper-bot/.venv/bin"
+ExecStart=/home/adrian/smc-paper-bot/.venv/bin/python -m bot.engine --paper
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/adrian/smc-paper-bot/logs/stdout.log
+StandardError=append:/home/adrian/smc-paper-bot/logs/stderr.log
+
+[Install]
+WantedBy=multi-user.target
