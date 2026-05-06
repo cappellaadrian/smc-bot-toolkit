@@ -52,6 +52,11 @@ class StrategyConfig:
     stop_buffer_pct: float = 0.001   # extra distance below sweep low / above sweep high
     min_rr: float = 2.0              # TP1 floor in R-multiples
     max_rr: float = 3.0              # TP2 cap in R-multiples
+    # Filter toggles. Strict (all True) follows the spec faithfully but
+    # produces few signals on 4h crypto. Loosening trades signal quantity
+    # for spec fidelity.
+    require_bias: bool = True        # skip neutral-bias bars, restrict by direction
+    require_pd: bool = True          # require discount for long, premium for short
 
 
 def generate_signal(df: pd.DataFrame, cfg: StrategyConfig = StrategyConfig()) -> Optional[Signal]:
@@ -65,20 +70,29 @@ def generate_signal(df: pd.DataFrame, cfg: StrategyConfig = StrategyConfig()) ->
         return None
 
     bias = d.market_structure(swings)
-    if bias == "neutral":
+    if cfg.require_bias and bias == "neutral":
         return None
 
     bar = df.iloc[-1]
     price = float(bar["close"])
     range_high = float(df["high"].iloc[-cfg.range_window:].max())
     range_low = float(df["low"].iloc[-cfg.range_window:].min())
+    in_disc = d.in_discount(price, range_high, range_low)
+    in_prem = d.in_premium(price, range_high, range_low)
 
-    if cfg.enable_long and bias == "bullish" and d.in_discount(price, range_high, range_low):
+    long_ok = cfg.enable_long and (
+        not cfg.require_bias or bias in ("bullish", "neutral")
+    ) and (not cfg.require_pd or in_disc)
+    short_ok = cfg.enable_short and (
+        not cfg.require_bias or bias in ("bearish", "neutral")
+    ) and (not cfg.require_pd or in_prem)
+
+    if long_ok:
         sig = _long_signal(df, swings, bar, price, cfg)
         if sig is not None:
             return sig
 
-    if cfg.enable_short and bias == "bearish" and d.in_premium(price, range_high, range_low):
+    if short_ok:
         sig = _short_signal(df, swings, bar, price, cfg)
         if sig is not None:
             return sig
