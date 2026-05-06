@@ -52,10 +52,11 @@ class StrategyConfig:
     stop_buffer_pct: float = 0.001   # extra distance below sweep low / above sweep high
     min_rr: float = 2.0              # TP1 floor in R-multiples
     max_rr: float = 3.0              # TP2 cap in R-multiples
-    # Filter toggles. Strict (all True) follows the spec faithfully but
-    # produces few signals on 4h crypto. Loosening trades signal quantity
-    # for spec fidelity.
-    require_bias: bool = True        # skip neutral-bias bars, restrict by direction
+    # Filter toggles. Strict (require_bias=True, require_pd=True) follows
+    # the spec faithfully but produces ~1 trade/year/symbol on 4h crypto.
+    # Default is require_bias=False because backtests showed the bias filter
+    # cuts signals 22x without improving win rate; require_pd stays on.
+    require_bias: bool = False       # restrict by HH/HL or LH/LL structure
     require_pd: bool = True          # require discount for long, premium for short
 
 
