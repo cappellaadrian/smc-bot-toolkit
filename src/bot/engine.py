@@ -6,7 +6,6 @@ Run with:
 """
 import asyncio
 import sys
-from datetime import datetime, timezone
 import click
 from loguru import logger
 
@@ -127,12 +126,9 @@ async def run_engine(paper: bool = True):
 
 
 @click.command()
-@click.option("--paper", is_flag=True, default=True, help="Force paper trading (default)")
-@click.option("--live", is_flag=True, default=False,
-              help="Use live broker (requires explicit env guard)")
-def main(paper: bool, live: bool):
-    if live:
-        paper = False
+@click.option("--paper/--live", default=True,
+              help="Paper trading (default) or live (requires explicit env guard).")
+def main(paper: bool):
     asyncio.run(run_engine(paper=paper))
 
 

@@ -11,7 +11,7 @@ Schema (run migrations from supabase/migrations/):
   - kill_switch_events: ts, tripped, reason
 """
 from datetime import datetime, timezone
-from typing import Optional, Protocol
+from typing import Protocol
 from loguru import logger
 
 try:

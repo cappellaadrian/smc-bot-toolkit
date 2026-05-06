@@ -4,7 +4,7 @@ Paper broker. In-memory simulation of order placement, fills, and PnL.
 Honors the same SL/TP/partial logic as the backtest engine. Designed to be
 swappable with live_broker.py through the Broker protocol.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Literal, Protocol
 from datetime import datetime, timezone
 import uuid

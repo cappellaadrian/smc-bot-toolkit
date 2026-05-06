@@ -7,7 +7,6 @@ boundary. Simple, reliable, sufficient for 4h timeframe trading.
 V2 TODO: switch to websocket for sub-second data (only needed for lower TFs).
 """
 import asyncio
-import time
 from datetime import datetime, timezone, timedelta
 from typing import AsyncIterator
 import pandas as pd

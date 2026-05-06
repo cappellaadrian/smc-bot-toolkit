@@ -2,7 +2,7 @@
 
 ## What this project is
 
-A live execution wrapper around a previously-built SMC backtester. The goal is **paper trading on BingX**, not live money. The underlying strategy was already backtested and shown to lose money on real BTC/ETH 4h data over 360 days. We're building this anyway as a learning exercise to understand exchange APIs, websockets, and live trading infrastructure.
+A live execution wrapper around an SMC strategy distilled from a corpus of trader transcripts. The goal is **paper trading on BingX**, not live money. The strategy in v1 implements **Setup A (IFVG entry)** from the blended methodology in `docs/daniel_ramirez_bot_strategy.md`, derived from 1775 video transcripts of dodgysdd, ICT, and Daniel Ramirez. On a 1-year BTC/ETH 4h backtest the spec produces ~2 trades per year per symbol — the strict bias + premium/discount + IFVG + sweep + DOL filters are designed for 5M futures execution and are very restrictive on 4h crypto. Treat the result as infrastructure exercise, not alpha.
 
 **DO NOT remove the paper-trading guards. DO NOT add live-trading code paths without an explicit instruction from Adrian.**
 
@@ -14,12 +14,13 @@ src/
   data_feed.py        — BingX websocket client, OHLCV stream
   strategy.py         — port of the backtest strategy (uses detectors.py)
   detectors.py        — copied verbatim from /backtest, do not modify
-  engine.py           — main loop, ties feed -> strategy -> execution
-  execution.py        — order placement, OCO logic (paper + live abstractions)
+  engine.py           — main loop, ties feed -> strategy -> broker
   state.py            — Supabase client, persistence layer
   risk.py             — daily loss limit, position cap, kill switch
   alerts.py           — Telegram notifications
-  paper_broker.py     — in-memory paper trading broker (DEFAULT)
+  paper_broker.py     — in-memory paper trading broker (DEFAULT). Order/exit
+                        logic lives here behind the Broker Protocol; there is
+                        no separate execution.py layer.
   live_broker.py      — ccxt BingX wrapper (BLOCKED unless explicitly enabled)
 
 tests/
@@ -93,4 +94,4 @@ docs/
 
 ## Background context
 
-The strategy was developed in `/backtest`. Read `daniel_ramirez_bot_strategy.md` for the methodology spec. Read the backtest results in `backtest_pkg.zip` to understand why we already know this strategy loses money. **The point of this build is the infrastructure, not the alpha.**
+The strategy in v1 was derived from 1775 trader video transcripts (dodgysdd, ICT, Daniel Ramirez) — see `docs/daniel_ramirez_bot_strategy.md` for the full blended methodology spec, and the sibling `~/Documents/trading-project/` workspace for the extraction pipeline (`extract_concepts.py`, `aggregate_methodology.py`, `synthesize_strategy.py`) and historical data. Setup A (IFVG entry) is encoded; Setups B and C (HTF FVG + SMT, Judas swing) are deferred. The single 4h timeframe used here is a v1 simplification of the spec's multi-timeframe model — see `docs/STRATEGY.md` and the spec for what's missing. **The point of this build is the infrastructure, not the alpha.**

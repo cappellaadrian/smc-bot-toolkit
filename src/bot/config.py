@@ -6,7 +6,7 @@ will refuse to instantiate unless LIVE_TRADING_EXPLICITLY_ENABLED is set to the
 exact magic string. This is intentional friction.
 """
 from typing import Literal
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

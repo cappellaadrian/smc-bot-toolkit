@@ -2,7 +2,6 @@
 Telegram alerting. Falls back to logging if not configured.
 """
 import asyncio
-from typing import Optional
 import requests
 from loguru import logger
 
