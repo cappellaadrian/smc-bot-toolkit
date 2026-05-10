@@ -22,14 +22,13 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]      # .../live_bot
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 load_dotenv(ROOT / ".env")
 load_dotenv(ROOT.parent / ".env", override=False)
 
 from bot.paper_broker import PaperBroker  # noqa: E402
 from bot.strategy import StrategyConfig, generate_signal, position_size_usd  # noqa: E402
-
-# Reuse the fetcher
 from fetch_history import fetch_history  # noqa: E402
 
 
