@@ -111,6 +111,73 @@ def get_supabase():
         return None
 
 
+@st.cache_data(ttl=60)
+def fetch_calibration(_sb_marker: str, limit: int = 50) -> str:
+    """Pull last `limit` closed trades from Supabase, group by Claude verdict,
+    return a compact text block to inject into the system prompt. Returns
+    empty string if not enough data.
+
+    The `_sb_marker` arg is just a cache-buster so st.cache_data picks up
+    schema changes; supabase client itself is unhashable.
+    """
+    sb = get_supabase()
+    if sb is None:
+        return ""
+    try:
+        # Fetch closed trades + their outcomes (left join via two queries)
+        trades = (sb.table("reviewed_trades")
+                  .select("id, verdict, status, symbol, side")
+                  .eq("status", "closed")
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute().data) or []
+        if len(trades) < 5:
+            return ""
+        ids = [t["id"] for t in trades]
+        outcomes = (sb.table("trade_outcomes")
+                    .select("trade_id, r_multiple, outcome")
+                    .in_("trade_id", ids)
+                    .execute().data) or []
+    except Exception:
+        return ""
+    if not outcomes:
+        return ""
+    o_by_id = {o["trade_id"]: o for o in outcomes}
+    buckets: dict[str, list[float]] = {"VALID": [], "PARTIAL": [], "NOT": [], "INSUFFICIENT": []}
+    for t in trades:
+        o = o_by_id.get(t["id"])
+        if o is None:
+            continue
+        v = (t.get("verdict") or "").upper() or "INSUFFICIENT"
+        try:
+            r = float(o["r_multiple"]) if o.get("r_multiple") is not None else None
+        except (TypeError, ValueError):
+            r = None
+        if r is not None:
+            buckets.setdefault(v, []).append(r)
+    lines: list[str] = []
+    for verdict in ("VALID", "PARTIAL", "NOT", "INSUFFICIENT"):
+        rs = buckets.get(verdict, [])
+        if not rs:
+            continue
+        wins = sum(1 for r in rs if r > 0)
+        losses = sum(1 for r in rs if r <= 0)
+        wr = wins / max(1, wins + losses) * 100
+        avg_r = sum(rs) / len(rs)
+        lines.append(f"  {verdict}: {len(rs)} trades, win_rate={wr:.0f}%, avg_R={avg_r:+.2f}")
+    if not lines:
+        return ""
+    return (
+        "\n\n--- USER'S JOURNAL CALIBRATION (last "
+        f"{len(trades)} closed trades) ---\n"
+        + "\n".join(lines)
+        + "\n\nCalibrate against this. If you'd score this trade VALID but the user has only "
+        "won 30% on VALID trades, flag that mismatch in your verdict. Add a 'Calibration' "
+        "section after 'Honest framing' that compares this trade to the user's actual "
+        "historical hit rate by verdict."
+    )
+
+
 def parse_verdict(md: str) -> str | None:
     m = re.search(r"##\s*Verdict\s*\n+\s*\**(\w[^\n*]*?)\**\s*(?:$|\n)", md, re.IGNORECASE)
     if not m:
@@ -216,7 +283,18 @@ if submitted:
         st.image(image_bytes, caption="Uploaded chart", use_container_width=True)
 
     spec = load_spec()
+    calibration = fetch_calibration("v1")
     user_content = build_user_message(description, image_bytes, image_type, symbol, tf)
+
+    if calibration:
+        st.caption("Using journal calibration from your last closed trades.")
+
+    system_text = (
+        SYSTEM_PROMPT
+        + "\n\n--- ENCODED METHODOLOGY ---\n\n"
+        + spec
+        + (calibration or "")
+    )
 
     with st.spinner("Claude is reviewing the trade..."):
         client = get_client()
@@ -227,7 +305,7 @@ if submitted:
                 system=[
                     {
                         "type": "text",
-                        "text": SYSTEM_PROMPT + "\n\n--- ENCODED METHODOLOGY ---\n\n" + spec,
+                        "text": system_text,
                         "cache_control": {"type": "ephemeral"},
                     }
                 ],

@@ -1,0 +1,32 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps for any wheels that need building
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+
+# Webhook only needs a subset of requirements (no streamlit, no altair).
+RUN pip install --no-cache-dir \
+        fastapi \
+        "uvicorn[standard]" \
+        anthropic \
+        supabase \
+        python-dotenv \
+        requests \
+        loguru
+
+COPY src/ /app/src/
+COPY scripts/ /app/scripts/
+COPY docs/ /app/docs/
+COPY pyproject.toml /app/pyproject.toml
+
+# Install just the bot package so 'from bot.config' etc still works
+RUN pip install --no-cache-dir -e .
+
+ENV PYTHONPATH=/app/src:/app/scripts
+EXPOSE 8080
+CMD ["uvicorn", "scripts.webhook:app", "--host", "0.0.0.0", "--port", "8080"]
