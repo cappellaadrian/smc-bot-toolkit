@@ -1,4 +1,4 @@
-"""Trade Reviewer — Claude-powered methodology check on a trade idea / chart.
+"""Trade Reviewer — Claude-powered methodology check, with optional save to journal.
 
 Run via the multi-page Streamlit app:
   streamlit run streamlit_app.py
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -24,7 +25,6 @@ try:
 except Exception:
     pass
 
-# Locally, also try .env files.
 load_dotenv(PROJECT_ROOT / ".env")
 load_dotenv(ROOT / ".env", override=False)
 
@@ -34,13 +34,14 @@ st.set_page_config(page_title="Trade Reviewer", layout="wide")
 st.title("Trade Reviewer")
 st.caption(
     "Paste a trade idea or upload a chart screenshot. Claude evaluates it "
-    "against the encoded methodology (bias, P/D, FVG, sweep, IFVG, DOL, RR)."
+    "against the encoded methodology (bias, P/D, FVG, sweep, IFVG, DOL, RR). "
+    "Save analyzed trades to the journal to track outcomes over time."
 )
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     st.error(
-        "ANTHROPIC_API_KEY not set. Add it in the sidebar via Streamlit secrets, "
-        "or `.env` at the project root, then reload."
+        "ANTHROPIC_API_KEY not set. Add it in Streamlit secrets or `.env`, "
+        "then reload."
     )
     st.stop()
 
@@ -97,6 +98,64 @@ def get_client() -> anthropic.Anthropic:
     return anthropic.Anthropic()
 
 
+@st.cache_resource
+def get_supabase():
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    if not (url and key):
+        return None
+    try:
+        from supabase import create_client
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def parse_verdict(md: str) -> str | None:
+    m = re.search(r"##\s*Verdict\s*\n+\s*\**(\w[^\n*]*?)\**\s*(?:$|\n)", md, re.IGNORECASE)
+    if not m:
+        return None
+    text = m.group(1).strip().upper()
+    if "VALID" in text:
+        return "VALID"
+    if "PARTIAL" in text:
+        return "PARTIAL"
+    if "NOT" in text:
+        return "NOT"
+    if "INSUFFICIENT" in text:
+        return "INSUFFICIENT"
+    return None
+
+
+def parse_scores(md: str) -> dict[str, int]:
+    """Best-effort: find lines like '- HTF bias direction ... 7/10' or '7'."""
+    scores: dict[str, int] = {}
+    section = re.search(r"##\s*Score[^\n]*\n(.+?)(?:\n##|\Z)", md, re.DOTALL | re.IGNORECASE)
+    if not section:
+        return scores
+    body = section.group(1)
+    for line in body.splitlines():
+        m = re.search(r"^\s*[-*]\s*([^:]+?)(?::|—|-)\s*\**(\d{1,2})(?:\s*/\s*10)?\**", line)
+        if not m:
+            m = re.search(r"^\s*[-*]\s*\**([^*:]+?)\**\s*[:\-—]\s*\**(\d{1,2})\b", line)
+        if m:
+            label = m.group(1).strip().lower()
+            try:
+                val = int(m.group(2))
+            except ValueError:
+                continue
+            if 0 <= val <= 10:
+                scores[label[:60]] = val
+    return scores
+
+
+def parse_summary(md: str) -> str:
+    m = re.search(r"##\s*Verdict\s*\n+(.+?)(?:\n##|\Z)", md, re.DOTALL | re.IGNORECASE)
+    if not m:
+        return ""
+    return m.group(1).strip()[:500]
+
+
 def build_user_message(description: str, image_bytes: bytes | None,
                        image_type: str | None, symbol: str, tf: str) -> list[dict]:
     parts: list[dict] = []
@@ -119,6 +178,7 @@ def build_user_message(description: str, image_bytes: bytes | None,
     return parts
 
 
+# --- Form: trade inputs ---
 with st.form("trade_form", clear_on_submit=False):
     col1, col2 = st.columns([2, 1])
     with col1:
@@ -126,15 +186,15 @@ with st.form("trade_form", clear_on_submit=False):
             "Trade idea",
             height=180,
             placeholder=(
-                "Going long BTC at 65,200. There's a bearish 4h FVG that just "
-                "got inverted (close above 65,150 last candle). Sweep of the "
-                "swing low at 63,800 happened 6 bars ago. Stop at 63,750, "
-                "TP1 at equal highs 67,400."
+                "Going long BTC at 65,200. Bearish 4h FVG just inverted "
+                "(close above 65,150). Sweep of swing low at 63,800 happened "
+                "6 bars ago. Stop at 63,750, TP1 at equal highs 67,400."
             ),
         )
     with col2:
-        symbol = st.text_input("Symbol (optional)", value="")
+        symbol = st.text_input("Symbol", value="", placeholder="BTC-USDT, EURUSD, ES, ...")
         tf = st.selectbox("Timeframe", ["", "5m", "15m", "1h", "4h", "1d"], index=0)
+        side = st.selectbox("Side (optional)", ["", "long", "short"], index=0)
         uploaded = st.file_uploader(
             "Chart screenshot (optional)",
             type=["png", "jpg", "jpeg", "webp"],
@@ -142,6 +202,7 @@ with st.form("trade_form", clear_on_submit=False):
         )
     submitted = st.form_submit_button("Analyze", type="primary")
 
+# --- Run analysis ---
 if submitted:
     if not description.strip() and uploaded is None:
         st.warning("Add a trade description, a screenshot, or both.")
@@ -183,10 +244,82 @@ if submitted:
     cache_read_cost = (usage.cache_read_input_tokens or 0) / 1e6 * 0.30
     cache_create_cost = (usage.cache_creation_input_tokens or 0) / 1e6 * 3.75
     total = in_cost + out_cost + cache_read_cost + cache_create_cost
-    st.caption(
-        f"Tokens: input={usage.input_tokens} output={usage.output_tokens} "
-        f"cache_read={usage.cache_read_input_tokens or 0} "
-        f"cache_create={usage.cache_creation_input_tokens or 0} "
-        f"— cost ~${total:.4f}"
-    )
-    st.markdown(text)
+
+    # Stash in session state for the save form below
+    st.session_state["last_analysis"] = {
+        "text": text,
+        "verdict": parse_verdict(text),
+        "scores": parse_scores(text),
+        "summary": parse_summary(text),
+        "symbol": symbol,
+        "tf": tf,
+        "side": side,
+        "description": description,
+        "has_chart": image_bytes is not None,
+        "cost": total,
+    }
+
+# --- Show last analysis (persists across reruns inside this session) ---
+analysis = st.session_state.get("last_analysis")
+if analysis:
+    st.caption(f"Last analysis cost: ~${analysis['cost']:.4f}")
+    st.markdown(analysis["text"])
+
+    st.divider()
+    st.subheader("Save to journal")
+    sb = get_supabase()
+    if sb is None:
+        st.info(
+            "Supabase not configured — set `SUPABASE_URL` and `SUPABASE_KEY` "
+            "to save analyzed trades to the journal."
+        )
+    else:
+        with st.form("save_trade_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                save_status = st.selectbox(
+                    "Action",
+                    ["taken", "planned", "skipped"],
+                    index=0,
+                    help="taken = you opened the trade; planned = waiting; skipped = no fill",
+                )
+                save_side = st.selectbox(
+                    "Side",
+                    ["long", "short"],
+                    index=0 if (analysis.get("side") or "long") == "long" else 1,
+                )
+            with c2:
+                planned_entry = st.number_input("Entry", value=0.0, format="%.5f")
+                planned_stop = st.number_input("Stop", value=0.0, format="%.5f")
+            with c3:
+                planned_tp1 = st.number_input("TP1", value=0.0, format="%.5f")
+                planned_tp2 = st.number_input("TP2 (optional)", value=0.0, format="%.5f")
+            risk_pct = st.number_input("Risk % of equity", value=1.0, min_value=0.0, max_value=10.0, step=0.1)
+            note = st.text_area("Notes (optional)", height=70)
+            save = st.form_submit_button("Save trade", type="primary")
+
+        if save:
+            row = {
+                "symbol": analysis["symbol"] or None,
+                "timeframe": analysis["tf"] or None,
+                "side": save_side,
+                "description": analysis["description"] or None,
+                "has_chart": analysis["has_chart"],
+                "verdict": analysis["verdict"],
+                "claude_summary": analysis["summary"],
+                "claude_full": analysis["text"][:50000],
+                "scores": analysis["scores"] or None,
+                "status": save_status,
+                "planned_entry": planned_entry or None,
+                "planned_stop": planned_stop or None,
+                "planned_tp1": planned_tp1 or None,
+                "planned_tp2": planned_tp2 or None,
+                "risk_pct": risk_pct or None,
+                "notes": note or None,
+            }
+            try:
+                resp = sb.table("reviewed_trades").insert(row).execute()
+                trade_id = resp.data[0]["id"] if resp.data else "(unknown)"
+                st.success(f"Saved as `{trade_id[:8]}...`. See **Trade Journal** in the sidebar.")
+            except Exception as e:
+                st.error(f"Save failed: {e}")
